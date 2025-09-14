@@ -1,73 +1,89 @@
+import os
 import argparse
 import requests
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 
-BASE = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
+COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=30"
 
-def fetch_token_market(id: str, vs: str = "usd", days: int = 30):
-    url = BASE.format(id=id)
-    r = requests.get(url, params={"vs_currency": vs, "days": days}, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    prices = pd.DataFrame(data["prices"], columns=["ts", "price"])
-    volumes = pd.DataFrame(data["total_volumes"], columns=["ts", "volume"])
+def fetch_token_data(token="bitcoin", days=30, vs="usd"):
+    """
+    Pull token price + volume data from CoinGecko.
+    """
+    try:
+        url = COINGECKO_URL.format(token=token)
+        resp = requests.get(url, params={"vs_currency": vs, "days": days}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print("[!] fetch failed:", e)
+        return pd.DataFrame() 
+
+    prices = pd.DataFrame(data.get("prices", []), columns=["ts", "price"])
+    volumes = pd.DataFrame(data.get("total_volumes", []), columns=["ts", "volume"])
+    prices["ts"] = pd.to_datetime(prices["ts"], unit="ms")
+    volumes["ts"] = pd.to_datetime(volumes["ts"], unit="ms")
     df = prices.merge(volumes, on="ts")
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
-    return df.sort_values("ts").reset_index(drop=True)
+    return df
 
-def detect_anomalies(df: pd.DataFrame, z: float = 3.0, win: int = 24):
-    out = df.copy()
-    out["ret"] = out["price"].pct_change()
-    out["vol_ma"] = out["volume"].rolling(win, min_periods=max(3, win//3)).mean()
-    out["vol_sd"] = out["volume"].rolling(win, min_periods=max(3, win//3)).std(ddof=0)
-    out["vol_z"] = (out["volume"] - out["vol_ma"]) / (out["vol_sd"].replace(0, np.nan))
-    out["ret_ma"] = out["ret"].rolling(win, min_periods=max(3, win//3)).mean()
-    out["ret_sd"] = out["ret"].rolling(win, min_periods=max(3, win//3)).std(ddof=0)
-    out["ret_z"] = (out["ret"] - out["ret_ma"]) / (out["ret_sd"].replace(0, np.nan))
-    out["vol_spike"] = out["vol_z"] > z
-    out["pump_spike"] = out["ret_z"] > z
-    out["dump_spike"] = out["ret_z"] < -z
-    return out
+def plot_anomalies(df, token="bitcoin", out_path="out/task2_analysis.png"):
+    """
+    Plot volume over time and flag unusual spikes.
+    """
+    if df.empty:
+        print("[i] no data to plot")
+        return
 
-def plot_anomalies(df: pd.DataFrame, out_path: str, label: str):
-    fig, ax1 = plt.subplots(figsize=(12, 6))
-    ax1.plot(df["ts"], df["price"], label="Price")
-    ax1.set_ylabel("Price")
-    ax1.set_title(f"{label}: Price & Volume (anomalies)")
-    ax2 = ax1.twinx()
-    ax2.plot(df["ts"], df["volume"], label="Volume", alpha=0.5)
-    ax2.set_ylabel("Volume")
-    for _, r in df[df["vol_spike"]].iterrows():
-        ax2.scatter(r["ts"], r["volume"], s=30)
-        ax2.annotate("Volume spike", (r["ts"], r["volume"]), xytext=(0, 18), textcoords="offset points", fontsize=8, rotation=30)
-    for _, r in df[df["pump_spike"]].iterrows():
-        ax1.scatter(r["ts"], r["price"], s=20)
-        ax1.annotate("Pump", (r["ts"], r["price"]), xytext=(0, -22), textcoords="offset points", fontsize=8, rotation=30)
-    for _, r in df[df["dump_spike"]].iterrows():
-        ax1.scatter(r["ts"], r["price"], s=20)
-        ax1.annotate("Dump", (r["ts"], r["price"]), xytext=(0, 14), textcoords="offset points", fontsize=8, rotation=30)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=200)
-    print(f"[+] Saved {out_path}")
+df = fetch_token_data("dogecoin", days=30)
+
+print(df.head())
+
+
+out_path = "out/task2_doge.png"
+token = "dogecoin"
+
+threshold = df["volume"].mean() + 2 * df["volume"].std()
+spikes = df[df["volume"] > threshold]
+
+plt.figure(figsize=(12, 6))
+plt.plot(df["ts"], df["volume"], label="Volume", color="orange")
+plt.scatter(spikes["ts"], spikes["volume"], color="red", label="suspicious spike")
+plt.title(f"{token.upper()} trading volume (last {len(df)//24} days)")
+plt.xlabel("Date")
+plt.ylabel("Volume")
+plt.legend()
+plt.tight_layout()
+plt.savefig(out_path, dpi=200)
+plt.close()
+
+abs_path = os.path.abspath(out_path)
+print(f"[saved] {abs_path}")
+
+def parse_arguments():
+    import sys
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--token", default="bitcoin", help="coin id (e.g. bitcoin, ethereum, dogecoin)")
+    ap.add_argument("--days", type=int, default=30, help="days of history (7/14/30)")
+    ap.add_argument("--out", default="out/task2_analysis.png", help="output PNG path")
+
+
+    if "ipykernel" in sys.modules:
+        return ap.parse_args([])   
+    return ap.parse_args()
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--token-id", required=True)
-    ap.add_argument("--days", type=int, default=30)
-    ap.add_argument("--z", type=float, default=3.0)
-    ap.add_argument("--win", type=int, default=24)
-    ap.add_argument("--out", default="out/task2_anomalies.png")
-    args = ap.parse_args()
+    args = parse_arguments()
+    print(f"[i] fetching {args.token} data for {args.days} days…")
+    df = fetch_token_data(args.token, args.days)
 
-    df = fetch_token_market(args.token_id, days=args.days)
-    df2 = detect_anomalies(df, z=args.z, win=args.win)
-    plot_anomalies(df2, args.out, args.token_id)
+    if df.empty:
+        print("[!] no data fetched, exiting")
+        return
 
-    flagged = df2[(df2["vol_spike"]) | (df2["pump_spike"]) | (df2["dump_spike"])][["ts","price","volume","vol_z","ret_z"]]
-    print("\n=== Flagged points ===")
-    print(flagged.tail(15).to_string(index=False))
+    print("[i] plotting anomalies…")
+    plot_anomalies(df, args.token, args.out)
+
 
 if __name__ == "__main__":
     main()
+
